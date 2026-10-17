@@ -226,13 +226,13 @@ jdisp8_2431: addr is op32_2431_signed [addr = inst_next + op32_2431_signed; ] {
 
 macro push8(val8) {
 	SP = SP - 1;
-	local ptr:1 = SP:1;
-	*:1 ptr = val8:1;
+	# SP itself is the (2-byte) pointer; a 1-byte pointer is invalid because the
+	# address space is 2 bytes wide.
+	*:1 SP = val8:1;
 }
 
 macro pop8(ret8) {
-	local ptr:1 = SP:1;
-	ret8 = *:1 ptr;
+	ret8 = *:1 SP;
 	SP = SP + 1;
 }
 
@@ -1688,17 +1688,29 @@ macro pop16(ret16) {
 
 # Instruction: ROR4
 # Format: ROR4 [HL]
-# Description: Word Data Rotation to the Right with Carry
+# Description: 4-Bit Data Rotation to the Right (A low nibble <-> (HL) nibbles)
 # Addressing Mode: Register
-:ROR4 [HL] is op16_07 = 0b00110001 & op16_815 = 0b10010000 & HL unimpl
+# Operation: A3-0 <- (HL)3-0, (HL)7-4 <- A3-0, (HL)3-0 <- (HL)7-4  (A7-4 unaffected)
+:ROR4 [HL] is op16_07 = 0b00110001 & op16_815 = 0b10010000 & HL {
+	local hl:1 = *:1 HL;
+	local alo:1 = A & 0x0F;
+	A = (A & 0xF0) | (hl & 0x0F);
+	*HL = ((alo & 0x0F) << 4) | ((hl >> 4) & 0x0F);
+}
 
 
 
 # Instruction: ROL4
 # Format: ROL4 [HL]
-# Description: Word Data Rotation to the Right with Carry
+# Description: 4-Bit Data Rotation to the Left (A low nibble <-> (HL) nibbles)
 # Addressing Mode: Register
-:ROL4 [HL] is op16_07 = 0b00110001 & op16_815 = 0b10000000 & HL unimpl
+# Operation: A3-0 <- (HL)7-4, (HL)3-0 <- A3-0, (HL)7-4 <- (HL)3-0  (A7-4 unaffected)
+:ROL4 [HL] is op16_07 = 0b00110001 & op16_815 = 0b10000000 & HL {
+	local hl:1 = *:1 HL;
+	local alo:1 = A & 0x0F;
+	A = (A & 0xF0) | ((hl >> 4) & 0x0F);
+	*HL = ((hl & 0x0F) << 4) | (alo & 0x0F);
+}
 
 
 
@@ -1706,17 +1718,102 @@ macro pop16(ret16) {
 
 # Instruction: ADJBA
 # Format: ADJBA
-# Description: Word Data Rotation to the Right with Carry
+# Description: Decimal Adjust Accumulator after Addition
+# Operation (per A3-0 / A7-4 / AC / CY):
+#   AC=0, A3-0<=9: A7-4<=9 & CY=0  -> A += 0x00, CY=0, AC=0
+#                  otherwise        -> A += 0x60, CY=1, AC=0
+#   AC=0, A3-0>9:  A7-4<9  & CY=0  -> A += 0x06, CY=0, AC=1
+#                  otherwise        -> A += 0x66, CY=1, AC=1
+#   AC=1:          A7-4<=9 & CY=0  -> A += 0x06, CY=0, AC=0
+#                  otherwise        -> A += 0x66, CY=1, AC=0
+# Z is set from the result byte. CY/AC are written from the table, not computed.
+# Table taken from the silicon-validated k0emu emulator (1024/1024 cases).
 # Addressing Mode: Register
-:ADJBA is op16_07 = 0b01100001 & op16_815 = 0b10000000 unimpl
+:ADJBA is op16_07 = 0b01100001 & op16_815 = 0b10000000 {
+	local cy:1 = PSW[0, 1];
+	local ac:1 = PSW[4, 1];
+	local lo:1 = A & 0x0F;
+	local hi:1 = (A >> 4) & 0x0F;
+	local delta:1 = 0x00;
+	local ncy:1 = 0;
+	local nac:1 = 0;
+
+	if (ac != 0) goto <adjba_ac1>;
+	if (lo > 9) goto <adjba_ac0_lowgt9>;
+	# AC=0 and A3-0 <= 9: delta 0x00 or 0x60
+	if (cy != 0) goto <adjba_add60>;
+	if (hi < 10) goto <adjba_apply>;
+	goto <adjba_add60>;
+
+<adjba_ac0_lowgt9>
+	nac = 1;
+	if (cy != 0) goto <adjba_add66>;
+	if (hi >= 9) goto <adjba_add66>;
+	delta = 0x06;
+	goto <adjba_apply>;
+
+<adjba_ac1>
+	if (cy != 0) goto <adjba_add66>;
+	if (hi >= 10) goto <adjba_add66>;
+	delta = 0x06;
+	goto <adjba_apply>;
+
+<adjba_add60>
+	ncy = 1;
+	delta = 0x60;
+	goto <adjba_apply>;
+
+<adjba_add66>
+	ncy = 1;
+	delta = 0x66;
+
+<adjba_apply>
+	A = A + delta;
+	PSW[0, 1] = ncy;
+	PSW[4, 1] = nac;
+	PSW[6, 1] = (A == 0);
+}
 
 
 
 # Instruction: ADJBS
 # Format: ADJBS
-# Description: Word Data Rotation to the Right with Carry
+# Description: Decimal Adjust Accumulator after Subtract
+# Operation (per AC / CY):
+#   AC=0, CY=0 -> A -= 0x00, CY=0
+#   AC=0, CY=1 -> A -= 0x60, CY=1
+#   AC=1, CY=0 -> A -= 0x06, CY=0
+#   AC=1, CY=1 -> A -= 0x66, CY=1
+# Z is set from the result byte and AC is always cleared.
+# Table taken from the silicon-validated k0emu emulator (1024/1024 cases).
 # Addressing Mode: Register
-:ADJBS is op16_07 = 0b01100001 & op16_815 = 0b10010000 unimpl
+:ADJBS is op16_07 = 0b01100001 & op16_815 = 0b10010000 {
+	local cy:1 = PSW[0, 1];
+	local ac:1 = PSW[4, 1];
+	local delta:1 = 0x00;
+	local ncy:1 = 0;
+
+	if (ac != 0) goto <adjbs_ac1>;
+	if (cy == 0) goto <adjbs_apply>;
+	ncy = 1;
+	delta = 0x60;
+	goto <adjbs_apply>;
+
+<adjbs_ac1>
+	if (cy == 0) goto <adjbs_sub06>;
+	ncy = 1;
+	delta = 0x66;
+	goto <adjbs_apply>;
+
+<adjbs_sub06>
+	delta = 0x06;
+
+<adjbs_apply>
+	A = A - delta;
+	PSW[0, 1] = ncy;
+	PSW[4, 1] = 0;
+	PSW[6, 1] = (A == 0);
+}
 
 
 
@@ -1727,29 +1824,47 @@ macro pop16(ret16) {
 # Description: Byte Data Transfer
 # Addressing Mode: Short Direct
 # Note: Condition added here to prevent PSW instruction overlap.
-:MOV1 CY, saddr24low_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0100 & op24_1515 = 0b0 & op24_1623 >= 0x20 & op24_1623 & op24_1214 & CY & saddr24low_1623 unimpl
-:MOV1 CY, saddr24high_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0100 & op24_1515 = 0b0 & op24_1623 < 0x20 & op24_1623 != 0x1E & op24_1623 & op24_1214 & CY & saddr24high_1623 unimpl
+:MOV1 CY, saddr24low_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0100 & op24_1515 = 0b0 & op24_1623 >= 0x20 & op24_1623 & op24_1214 & CY & saddr24low_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = ((saddr24low_1623:1 & mask) != 0);
+}
+:MOV1 CY, saddr24high_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0100 & op24_1515 = 0b0 & op24_1623 < 0x20 & op24_1623 != 0x1E & op24_1623 & op24_1214 & CY & saddr24high_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = ((saddr24high_1623:1 & mask) != 0);
+}
 
 # Instruction: MOV1
 # Format: MOV1 CY, sfrp.bit
 # Description: Byte Data Transfer
 # Addressing Mode: Short Direct
-:MOV1 CY, sfr24_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b1100 & op24_1515 = 0b0 & ((op24_815 >= 0x00 & op24_815 <= 0xCF) | (op24_815 >= 0xE0 & op24_815 <= 0xFF)) & op24_815 & op24_1214 & CY & sfr24_1623 unimpl
+:MOV1 CY, sfr24_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b1100 & op24_1515 = 0b0 & ((op24_815 >= 0x00 & op24_815 <= 0xCF) | (op24_815 >= 0xE0 & op24_815 <= 0xFF)) & op24_815 & op24_1214 & CY & sfr24_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = ((sfr24_1623:1 & mask) != 0);
+}
 
 # Instruction: MOV1
 # Format: MOV1 CY,A.bit
 # Description: 1 Bit Data Move
-:MOV1 CY, A"."op16_1214 is op16_07 = 0b01100001 & op16_811 = 0b1100 & op16_1515 = 0b1 & op16_1214 & CY & A unimpl
+:MOV1 CY, A"."op16_1214 is op16_07 = 0b01100001 & op16_811 = 0b1100 & op16_1515 = 0b1 & op16_1214 & CY & A {
+	local mask:1 = (1 << op16_1214);
+	PSW[0, 1] = ((A & mask) != 0);
+}
 
 # Instruction: MOV1
 # Format: MOV1 CY,PSW.bit
 # Description: 1 Bit Data Move
-:MOV1 CY, PSW"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0100 & op24_1515 = 0b0 & op24_1214 & op24_1623 = 0b00011110 & CY & PSW unimpl
+:MOV1 CY, PSW"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0100 & op24_1515 = 0b0 & op24_1214 & op24_1623 = 0b00011110 & CY & PSW {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = ((PSW & mask) != 0);
+}
 
 # Instruction: MOV1
 # Format: MOV1 CY,[HL].bit
 # Description: 1 Bit Data Move
-:MOV1 CY, [HL]"."op16_1214 is op16_07 = 0b01110001 & op16_811 = 0b0100 & op16_1515 = 0b1 & op16_1214 & CY & HL unimpl
+:MOV1 CY, [HL]"."op16_1214 is op16_07 = 0b01110001 & op16_811 = 0b0100 & op16_1515 = 0b1 & op16_1214 & CY & HL {
+	local mask:1 = (1 << op16_1214);
+	PSW[0, 1] = ((*:1 HL & mask) != 0);
+}
 
 # Instruction: MOV1
 # Format: MOV1 saddr.bit, CY
@@ -1757,133 +1872,206 @@ macro pop16(ret16) {
 # Addressing Mode: Short Direct
 # Note: Condition added here to prevent PSW instruction overlap.
 :MOV1 saddr24low_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b0001 & op24_1515 = 0b0 & op24_1623 >= 0x20 & op24_1623 & op24_1214 & CY & saddr24low_1623 {
-	local mask = PSW[0, 1];
-	mask = mask << op24_1214;
-	local result = saddr24low_1623:1 | mask;
-	saddr24low_1623[0, 8] = result;
+	local mask:1 = (1 << op24_1214);
+	local cyv:1 = PSW[0, 1];
+	local result:1 = (saddr24low_1623:1 & ~mask) | (mask * cyv);
+	saddr24low_1623 = result;
 }
 
 :MOV1 saddr24high_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b0001 & op24_1515 = 0b0 & op24_1623 < 0x20 & op24_1623 != 0x1E & op24_1623 & op24_1214 & CY & saddr24high_1623 {
-	#local location = op24_1214:1;
-	#saddr24high_1623[location, 1] = CY;
-	#mask:1 = (CY << op24_1214);
-	#local result = saddr24high_1623:1 | mask;
-	#saddr24high_1623[0, 8] = result;
+	local mask:1 = (1 << op24_1214);
+	local cyv:1 = PSW[0, 1];
+	local result:1 = (saddr24high_1623:1 & ~mask) | (mask * cyv);
+	saddr24high_1623 = result;
 }
 
 # Instruction: MOV1
 # Format: MOV1 sfrp.bit, CY
 # Description: Byte Data Transfer
 # Addressing Mode: Short Direct
-:MOV1 sfr24_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b1001 & op24_1515 = 0b0 & ((op24_815 >= 0x00 & op24_815 <= 0xCF) | (op24_815 >= 0xE0 & op24_815 <= 0xFF)) & op24_815 & op24_1214 & CY & sfr24_1623 unimpl
+:MOV1 sfr24_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b1001 & op24_1515 = 0b0 & ((op24_815 >= 0x00 & op24_815 <= 0xCF) | (op24_815 >= 0xE0 & op24_815 <= 0xFF)) & op24_815 & op24_1214 & CY & sfr24_1623 {
+	local mask:1 = (1 << op24_1214);
+	local cyv:1 = PSW[0, 1];
+	local result:1 = (sfr24_1623:1 & ~mask) | (mask * cyv);
+	sfr24_1623 = result;
+}
 
 # Instruction: MOV1
 # Format: MOV1 A.bit,CY
 # Description: 1 Bit Data Move
-:MOV1 A"."op16_1214, CY is op16_07 = 0b01100001 & op16_811 = 0b1001 & op16_1515 = 0b1 & op16_1214 & CY & A unimpl
+:MOV1 A"."op16_1214, CY is op16_07 = 0b01100001 & op16_811 = 0b1001 & op16_1515 = 0b1 & op16_1214 & CY & A {
+	local mask:1 = (1 << op16_1214);
+	local cyv:1 = PSW[0, 1];
+	local result:1 = (A & ~mask) | (mask * cyv);
+	A = result;
+}
 
 # Instruction: MOV1
 # Format: MOV1 PSW.bit,CY
 # Description: 1 Bit Data Move
-:MOV1 PSW"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b0001 & op24_1515 = 0b0 & op24_1214 & op24_1623 = 0b00011110 & CY & PSW unimpl
+:MOV1 PSW"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b0001 & op24_1515 = 0b0 & op24_1214 & op24_1623 = 0b00011110 & CY & PSW {
+	local mask:1 = (1 << op24_1214);
+	local cyv:1 = PSW[0, 1];
+	local result:1 = (PSW & ~mask) | (mask * cyv);
+	PSW = result;
+}
 
 # Instruction: MOV1
 # Format: MOV1 [HL].bit,CY
 # Description: 1 Bit Data Move
-:MOV1 [HL]"."op16_1214, CY is op16_07 = 0b01110001 & op16_811 = 0b0001 & op16_1515 = 0b1 & op16_1214 & CY & HL unimpl
+:MOV1 [HL]"."op16_1214, CY is op16_07 = 0b01110001 & op16_811 = 0b0001 & op16_1515 = 0b1 & op16_1214 & CY & HL {
+	local mask:1 = (1 << op16_1214);
+	local cyv:1 = PSW[0, 1];
+	local result:1 = (*:1 HL & ~mask) | (mask * cyv);
+	*HL = result;
+}
 
 
 
 # Instruction: AND1
-# Format: AND1 saddr.bit, CY
+# Format: AND1 CY, saddr.bit
 # Description: Byte Data Transfer
 # Addressing Mode: Short Direct
 # Note: Condition added here to prevent PSW instruction overlap.
-:AND1 saddr24low_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b0101 & op24_1515 = 0b0 & op24_1623 >= 0x20 & op24_1623 & op24_1214 & CY & saddr24low_1623 unimpl
-:AND1 saddr24high_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b0101 & op24_1515 = 0b0 & op24_1623 < 0x20 & op24_1623 != 0x1E & op24_1623 & op24_1214 & CY & saddr24high_1623 unimpl
+:AND1 CY, saddr24low_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0101 & op24_1515 = 0b0 & op24_1623 >= 0x20 & op24_1623 & op24_1214 & CY & saddr24low_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] && ((saddr24low_1623:1 & mask) != 0);
+}
+:AND1 CY, saddr24high_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0101 & op24_1515 = 0b0 & op24_1623 < 0x20 & op24_1623 != 0x1E & op24_1623 & op24_1214 & CY & saddr24high_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] && ((saddr24high_1623:1 & mask) != 0);
+}
 
 # Instruction: AND1
-# Format: AND1 sfrp.bit, CY
+# Format: AND1 CY, sfr.bit
 # Description: Byte Data Transfer
 # Addressing Mode: Short Direct
-:AND1 sfr24_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b1101 & op24_1515 = 0b0 & ((op24_815 >= 0x00 & op24_815 <= 0xCF) | (op24_815 >= 0xE0 & op24_815 <= 0xFF)) & op24_815 & op24_1214 & CY & sfr24_1623 unimpl
+:AND1 CY, sfr24_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b1101 & op24_1515 = 0b0 & ((op24_815 >= 0x00 & op24_815 <= 0xCF) | (op24_815 >= 0xE0 & op24_815 <= 0xFF)) & op24_815 & op24_1214 & CY & sfr24_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] && ((sfr24_1623:1 & mask) != 0);
+}
 
 # Instruction: AND1
 # Format: AND1 CY,A.bit
 # Description: 1 Bit Data Logical Summation
-:AND1 CY, A"."op16_1214 is op16_07 = 0b01100001 & op16_811 = 0b1101 & op16_1515 = 0b1 & op16_1214 & CY & A unimpl
+:AND1 CY, A"."op16_1214 is op16_07 = 0b01100001 & op16_811 = 0b1101 & op16_1515 = 0b1 & op16_1214 & CY & A {
+	local mask:1 = (1 << op16_1214);
+	PSW[0, 1] = PSW[0, 1] && ((A & mask) != 0);
+}
 
 # Instruction: AND1
 # Format: AND1 CY,PSW.bit
 # Description: 1 Bit Data Logical Summation
-:AND1 CY, PSW"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0101 & op24_1515 = 0b0 & op24_1214 & op24_1623 = 0b00011110 & CY & PSW unimpl
+:AND1 CY, PSW"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0101 & op24_1515 = 0b0 & op24_1214 & op24_1623 = 0b00011110 & CY & PSW {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] && ((PSW & mask) != 0);
+}
 
 # Instruction: AND1
 # Format: AND1 CY,[HL].bit
 # Description: 1 Bit Data Logical Summation
-:AND1 CY, [HL]"."op16_1214 is op16_07 = 0b01110001 & op16_811 = 0b0101 & op16_1515 = 0b1 & op16_1214 & CY & HL unimpl
+:AND1 CY, [HL]"."op16_1214 is op16_07 = 0b01110001 & op16_811 = 0b0101 & op16_1515 = 0b1 & op16_1214 & CY & HL {
+	local mask:1 = (1 << op16_1214);
+	PSW[0, 1] = PSW[0, 1] && ((*:1 HL & mask) != 0);
+}
 
 
 
 # Instruction: OR1
-# Format: OR1 saddr.bit, CY
+# Format: OR1 CY, saddr.bit
 # Description: Byte Data Transfer
 # Addressing Mode: Short Direct
 # Note: Condition added here to prevent PSW instruction overlap.
-:OR1 saddr24low_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b0110 & op24_1515 = 0b0 & op24_1623 >= 0x20 & op24_1623 & op24_1214 & CY & saddr24low_1623 unimpl
-:OR1 saddr24high_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b0110 & op24_1515 = 0b0 & op24_1623 < 0x20 & op24_1623 != 0x1E & op24_1623 & op24_1214 & CY & saddr24high_1623 unimpl
+:OR1 CY, saddr24low_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0110 & op24_1515 = 0b0 & op24_1623 >= 0x20 & op24_1623 & op24_1214 & CY & saddr24low_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] || ((saddr24low_1623:1 & mask) != 0);
+}
+:OR1 CY, saddr24high_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0110 & op24_1515 = 0b0 & op24_1623 < 0x20 & op24_1623 != 0x1E & op24_1623 & op24_1214 & CY & saddr24high_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] || ((saddr24high_1623:1 & mask) != 0);
+}
 
 # Instruction: OR1
-# Format: OR1 sfrp.bit, CY
+# Format: OR1 CY, sfr.bit
 # Description: Byte Data Transfer
 # Addressing Mode: Short Direct
-:OR1 sfr24_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b1110 & op24_1515 = 0b0 & ((op24_815 >= 0x00 & op24_815 <= 0xCF) | (op24_815 >= 0xE0 & op24_815 <= 0xFF)) & op24_815 & op24_1214 & CY & sfr24_1623 unimpl
+:OR1 CY, sfr24_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b1110 & op24_1515 = 0b0 & ((op24_815 >= 0x00 & op24_815 <= 0xCF) | (op24_815 >= 0xE0 & op24_815 <= 0xFF)) & op24_815 & op24_1214 & CY & sfr24_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] || ((sfr24_1623:1 & mask) != 0);
+}
 
 # Instruction: OR1
 # Format: OR1 CY,A.bit
 # Description: 1 Bit Data Logical Summation
-:OR1 CY, A"."op16_1214 is op16_07 = 0b01100001 & op16_811 = 0b1110 & op16_1515 = 0b1 & op16_1214 & CY & A unimpl
+:OR1 CY, A"."op16_1214 is op16_07 = 0b01100001 & op16_811 = 0b1110 & op16_1515 = 0b1 & op16_1214 & CY & A {
+	local mask:1 = (1 << op16_1214);
+	PSW[0, 1] = PSW[0, 1] || ((A & mask) != 0);
+}
 
 # Instruction: OR1
 # Format: OR1 CY,PSW.bit
 # Description: 1 Bit Data Logical Summation
-:OR1 CY, PSW"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0110 & op24_1515 = 0b0 & op24_1214 & op24_1623 = 0b00011110 & CY & PSW unimpl
+:OR1 CY, PSW"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0110 & op24_1515 = 0b0 & op24_1214 & op24_1623 = 0b00011110 & CY & PSW {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] || ((PSW & mask) != 0);
+}
 
 # Instruction: OR1
 # Format: OR1 CY,[HL].bit
 # Description: 1 Bit Data Logical Summation
-:OR1 CY, [HL]"."op16_1214 is op16_07 = 0b01110001 & op16_811 = 0b0110 & op16_1515 = 0b1 & op16_1214 & CY & HL unimpl
+:OR1 CY, [HL]"."op16_1214 is op16_07 = 0b01110001 & op16_811 = 0b0110 & op16_1515 = 0b1 & op16_1214 & CY & HL {
+	local mask:1 = (1 << op16_1214);
+	PSW[0, 1] = PSW[0, 1] || ((*:1 HL & mask) != 0);
+}
 
 
 
 # Instruction: XOR1
-# Format: XOR1 saddr.bit, CY
+# Format: XOR1 CY, saddr.bit
 # Description: Byte Data Transfer
 # Addressing Mode: Short Direct
 # Note: Condition added here to prevent PSW instruction overlap.
-:XOR1 saddr24low_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b0111 & op24_1515 = 0b0 & op24_1623 >= 0x20 & op24_1623 & op24_1214 & CY & saddr24low_1623 unimpl
-:XOR1 saddr24high_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b0111 & op24_1515 = 0b0 & op24_1623 < 0x20 & op24_1623 != 0x1E & op24_1623 & op24_1214 & CY & saddr24high_1623 unimpl
+:XOR1 CY, saddr24low_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0111 & op24_1515 = 0b0 & op24_1623 >= 0x20 & op24_1623 & op24_1214 & CY & saddr24low_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] ^^ ((saddr24low_1623:1 & mask) != 0);
+}
+:XOR1 CY, saddr24high_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0111 & op24_1515 = 0b0 & op24_1623 < 0x20 & op24_1623 != 0x1E & op24_1623 & op24_1214 & CY & saddr24high_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] ^^ ((saddr24high_1623:1 & mask) != 0);
+}
 
 # Instruction: XOR1
-# Format: XOR1 sfrp.bit, CY
+# Format: XOR1 CY, sfr.bit
 # Description: Byte Data Transfer
 # Addressing Mode: Short Direct
-:XOR1 sfr24_1623"."op24_1214, CY is op24_07 = 0b01110001 & op24_811 = 0b1111 & op24_1515 = 0b0 & ((op24_815 >= 0x00 & op24_815 <= 0xCF) | (op24_815 >= 0xE0 & op24_815 <= 0xFF)) & op24_815 & op24_1214 & CY & sfr24_1623 unimpl
+:XOR1 CY, sfr24_1623"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b1111 & op24_1515 = 0b0 & ((op24_815 >= 0x00 & op24_815 <= 0xCF) | (op24_815 >= 0xE0 & op24_815 <= 0xFF)) & op24_815 & op24_1214 & CY & sfr24_1623 {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] ^^ ((sfr24_1623:1 & mask) != 0);
+}
 
 # Instruction: XOR1
 # Format: XOR1 CY,A.bit
 # Description: 1 Bit Data Logical Summation
-:XOR1 CY, A"."op16_1214 is op16_07 = 0b01100001 & op16_811 = 0b1111 & op16_1515 = 0b1 & op16_1214 & CY & A unimpl
+:XOR1 CY, A"."op16_1214 is op16_07 = 0b01100001 & op16_811 = 0b1111 & op16_1515 = 0b1 & op16_1214 & CY & A {
+	local mask:1 = (1 << op16_1214);
+	PSW[0, 1] = PSW[0, 1] ^^ ((A & mask) != 0);
+}
 
 # Instruction: XOR1
 # Format: XOR1 CY,PSW.bit
 # Description: 1 Bit Data Logical Summation
-:XOR1 CY, PSW"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0111 & op24_1515 = 0b0 & op24_1214 & op24_1623 = 0b00011110 & CY & PSW unimpl
+:XOR1 CY, PSW"."op24_1214 is op24_07 = 0b01110001 & op24_811 = 0b0111 & op24_1515 = 0b0 & op24_1214 & op24_1623 = 0b00011110 & CY & PSW {
+	local mask:1 = (1 << op24_1214);
+	PSW[0, 1] = PSW[0, 1] ^^ ((PSW & mask) != 0);
+}
 
 # Instruction: XOR1
 # Format: XOR1 CY,[HL].bit
 # Description: 1 Bit Data Logical Summation
-:XOR1 CY, [HL]"."op16_1214 is op16_07 = 0b01110001 & op16_811 = 0b0111 & op16_1515 = 0b1 & op16_1214 & CY & HL unimpl
+:XOR1 CY, [HL]"."op16_1214 is op16_07 = 0b01110001 & op16_811 = 0b0111 & op16_1515 = 0b1 & op16_1214 & CY & HL {
+	local mask:1 = (1 << op16_1214);
+	PSW[0, 1] = PSW[0, 1] ^^ ((*:1 HL & mask) != 0);
+}
 
 
 
@@ -2047,7 +2235,10 @@ macro pop16(ret16) {
 # Format: CALLF !addr16
 # Description: Subroutine Call
 # Addressing Mode: Direct Addressing
-:CALLF "!"addr11 is op16_7 = 0b0 & op16_03 = 0b1100 & op16_46 & op16_815 [addr11 = (0b1 << 11) + (op16_46 << 8) + op16_815;] unimpl
+:CALLF "!"addr11 is op16_7 = 0b0 & op16_03 = 0b1100 & op16_46 & op16_815 [addr11 = (0b1 << 11) + (op16_46 << 8) + op16_815;] {
+	local tgt:2 = 0x0800 + (op16_46 << 8) + op16_815;
+	call [tgt];
+}
 
 
 
@@ -2055,14 +2246,29 @@ macro pop16(ret16) {
 # Format: CALLT [addr5]
 # Description: Subroutine Call (Refer to the Call Table)
 # Addressing Mode: Table Indirect Addressing
-:CALLT [addr5] is op8_67 = 0b11 & op8_51_addr & op8_0 = 0b1 [addr5 = (op8_51_addr * 2) + 0x40;] unimpl
+:CALLT [addr5] is op8_67 = 0b11 & op8_51_addr & op8_0 = 0b1 [addr5 = (op8_51_addr * 2) + 0x40;] {
+	local a5:2 = 0x40 + (op8_51_addr * 2);
+	call [*:2 a5];
+}
 
 
 
 # Instruction: BRK
 # Format: BRK
 # Description: Software Vectored Interrupt
-:BRK is op8_full = 0xBF unimpl
+# Operation: (SP-1) <- PSW, (SP-2) <- (PC+1)H, (SP-3) <- (PC+1)L,
+#            PCH <- 0x00, PCL <- 0x3E, SP <- SP-3, IE <- 0
+# Push order is significant: PSW first, then the return address, so the stack
+# layout matches the sibling RETB pop (PC at SP, PSW at SP+2).
+:BRK is op8_full = 0xBF {
+	# inst_next needs an explicit size (a bare inst_next cannot resolve a size)
+	local ret:2 = inst_next + 0:2;
+	push8(PSW);
+	push16(ret);
+	PSW[7, 1] = 0;
+	# software vector: PCH <- 0x00, PCL <- 0x3E
+	call [0x003E:2];
+}
 
 
 
@@ -2078,14 +2284,26 @@ macro pop16(ret16) {
 # Instruction: RETB
 # Format: RETB
 # Description: Return from Break
-:RETB is op8_full = 0b10011111 unimpl
+:RETB is op8_full = 0b10011111 {
+	local pcret = *:2 SP;
+	SP = SP + 2;
+	PSW = *:1 SP;
+	SP = SP + 1;
+	return [pcret];
+}
 
 
 
 # Instruction: RETI
 # Format: RETI
 # Description: Return from Interrupt
-:RETI is op8_full = 0b10001111 unimpl
+:RETI is op8_full = 0b10001111 {
+	local pcret = *:2 SP;
+	SP = SP + 2;
+	PSW = *:1 SP;
+	SP = SP + 1;
+	return [pcret];
+}
 
 
 
@@ -2441,7 +2659,10 @@ macro pop16(ret16) {
 # Instruction: SEL
 # Format: SEL RBn
 # Description: Select Register Bank
-:SEL "RB"RB is op16_07 = 0b01100001 & op16_810 = 0b000 & op16_12 = 0b1 & op16_1415 = 0b11 & op16_11 & op16_13 [RB = (op16_13 << 1) + op16_11;] unimpl
+:SEL "RB"RB is op16_07 = 0b01100001 & op16_810 = 0b000 & op16_12 = 0b1 & op16_1415 = 0b11 & op16_11 & op16_13 [RB = (op16_13 << 1) + op16_11;] {
+	PSW[5, 1] = op16_13;
+	PSW[3, 1] = op16_11;
+}
 
 # Instruction: NOP
 # Format: NOP
