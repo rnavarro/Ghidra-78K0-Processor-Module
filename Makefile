@@ -49,8 +49,23 @@ clean:
 # changes there are lost on the next install and will not show up in git.
 deploy: install
 
+# Pull only when this branch actually tracks a remote. A local-only branch has
+# no upstream, and `git pull` there fails with a message about tracking
+# information that reads like a repo problem rather than a branch one.
+# Uncommitted changes are left alone: deploying a tree you have not committed
+# means the install cannot be reproduced from git, which defeats the point.
 install:
-	git pull --ff-only
+	@if ! git diff --quiet || ! git diff --cached --quiet; then \
+		echo "Working tree has uncommitted changes. Commit them first," >&2; \
+		echo "so the install stays reproducible from git." >&2; \
+		exit 1; \
+	fi
+	@if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then \
+		echo "git pull --ff-only"; \
+		git pull --ff-only || exit 1; \
+	else \
+		echo "Branch has no upstream, skipping pull."; \
+	fi
 	rsync -a --delete \
 		--exclude build.gradle \
 		$(CURDIR)/78K0/ $(GHIDRA)/Ghidra/Processors/78K0/
