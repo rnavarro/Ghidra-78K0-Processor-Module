@@ -20,7 +20,7 @@ LANGDIR := 78K0/data/languages
 # that silently skips it will not report them.
 SLEIGH_ARGS := $(shell sed -e 's/\#.*//' -e '/^[[:space:]]*$$/d' 78K0/data/sleighArgs.txt | tr '\n' ' ')
 
-.PHONY: all clean check
+.PHONY: all clean check install deploy
 
 all:
 	cd $(LANGDIR) && $(SLEIGH) $(SLEIGH_ARGS) 78K0.slaspec
@@ -35,3 +35,48 @@ check: all
 
 clean:
 	rm -f $(LANGDIR)/78K0.sla
+
+# Deploy into a Ghidra install. This repo keeps the module one directory down,
+# following the layout this project has always used, so a plain `git clone`
+# into Ghidra/Processors/78K0 would land the data one level too deep. This
+# target pulls and then copies instead.
+#
+# --delete makes the install an exact copy, so a file deleted here also
+# disappears there. build.gradle is excluded because it only applies inside a
+# Ghidra source tree and does nothing in an install.
+#
+# The install is a deployment target, not a checkout. Do not edit it in place:
+# changes there are lost on the next install and will not show up in git.
+deploy: install
+
+# Pull only when this branch actually tracks a remote. A local-only branch has
+# no upstream, and `git pull` there fails with a message about tracking
+# information that reads like a repo problem rather than a branch one.
+# Uncommitted changes are left alone: deploying a tree you have not committed
+# means the install cannot be reproduced from git, which defeats the point.
+install:
+	@if ! git diff --quiet || ! git diff --cached --quiet; then \
+		echo "Working tree has uncommitted changes. Commit them first," >&2; \
+		echo "so the install stays reproducible from git." >&2; \
+		exit 1; \
+	fi
+	@if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then \
+		echo "git pull --ff-only"; \
+		git pull --ff-only || exit 1; \
+	else \
+		echo "Branch has no upstream, skipping pull."; \
+	fi
+	rsync -a --delete \
+		--exclude build.gradle \
+		$(CURDIR)/78K0/ $(GHIDRA)/Ghidra/Processors/78K0/
+	@echo "---"
+	@echo "Deployed to $(GHIDRA)/Ghidra/Processors/78K0"
+	@echo "Restart Ghidra for the language to be reloaded."
+
+# Confirm the install matches this repo. Run after installing, and after any
+# Ghidra upgrade, since the module is hand-installed rather than shipped.
+verify:
+	@diff -rq \
+		--exclude build.gradle \
+		$(CURDIR)/78K0/ $(GHIDRA)/Ghidra/Processors/78K0/ \
+		&& echo "install matches repo"
